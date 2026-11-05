@@ -1,7 +1,6 @@
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const qrcode = require('qrcode');
 const generatePayload = require('promptpay-qr');
-const axios = require('axios');
 
 const client = new Client({
     intents: [
@@ -11,9 +10,10 @@ const client = new Client({
     ]
 });
 
-// กำหนด ID ของห้องสำหรับส่งประวัติการสั่งซื้อ
+// 1. ใส่ ID ของห้อง Discord ที่ต้องการให้ประวัติการซื้อเด้งไปแสดง
 const HISTORY_CHANNEL_ID = 'ใส่_ID_ห้องประวัติการซื้อตรงนี้';
-// กำหนดชื่อยศที่อนุญาตให้ใช้คำสั่งได้ (เช่น "ผู้ดูแล" หรือ "Admin")
+
+// 2. กำหนดชื่อยศผู้ดูแลที่สามารถใช้คำสั่งได้
 const ADMIN_ROLE_NAME = 'ผู้ดูแล';
 
 const commands = [
@@ -29,9 +29,13 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('verifyslip')
-        .setDescription('ตรวจสอบสลิปโอนเงินอัตโนมัติ (เฉพาะผู้ดูแล)')
+        .setDescription('บันทึกประวัติการสั่งซื้อและแนบสลิป (เฉพาะผู้ดูแล)')
         .addAttachmentOption(option => 
-            option.setName('slip').setDescription('แนบรูปสลิปโอนเงิน').setRequired(true))
+            option.setName('slip').setDescription('แนบรูปภาพสลิปการโอนเงิน').setRequired(true))
+        .addNumberOption(option => 
+            option.setName('amount').setDescription('จำนวนเงินที่โอน (บาท)').setRequired(true))
+        .addStringOption(option => 
+            option.setName('note').setDescription('หมายเหตุ หรือชื่อสินค้า (ถ้ามี)').setRequired(false))
 ].map(command => command.toJSON());
 
 client.once('ready', async () => {
@@ -62,7 +66,7 @@ client.on('interactionCreate', async interaction => {
 
     const { commandName } = interaction;
 
-    // 1. ระบบสั่งซื้อสินค้าและสร้าง QR Code พร้อมรูปภาพสินค้า (/buy)
+    // 1. คำสั่งสั่งซื้อสินค้าและสร้าง QR Code (/buy)
     if (commandName === 'buy') {
         const itemName = interaction.options.getString('item');
         const price = interaction.options.getNumber('price');
@@ -81,7 +85,7 @@ client.on('interactionCreate', async interaction => {
                 .setTitle('🛒 รายการสั่งซื้อสินค้า')
                 .setDescription(`**สินค้า:** ${itemName}\n**ยอดที่ต้องชำระ:** \`${price.toLocaleString()} บาท\``)
                 .setColor('Green')
-                .setFooter({ text: 'กรุณาส่งสลิปตรวจสอบด้วยคำสั่ง /verifyslip หลังจากโอนเงินแล้ว' });
+                .setFooter({ text: 'เมื่อโอนเงินเรียบร้อยแล้ว แจ้งผู้ดูแลเพื่อยืนยันรายการ' });
 
             if (itemImage) {
                 embed.setImage(itemImage.url);
@@ -97,14 +101,11 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // 2. ระบบเช็คสลิปและส่งรูปสลิปพร้อมประวัติไปยังอีกห้อง (/verifyslip)
+    // 2. คำสั่งบันทึกสลิปและส่งไปยังห้องประวัติการซื้อ (/verifyslip)
     else if (commandName === 'verifyslip') {
         const slipAttachment = interaction.options.getAttachment('slip');
-        const apiKey = process.env.EASYSLIP_API_KEY;
-
-        if (!apiKey) {
-            return interaction.reply({ content: '❌ ยังไม่ได้ตั้งค่า EASYSLIP_API_KEY ใน Environment Variables', ephemeral: true });
-        }
+        const amount = interaction.options.getNumber('amount');
+        const note = interaction.options.getString('note') || 'ไม่มี';
 
         if (!slipAttachment.contentType || !slipAttachment.contentType.startsWith('image/')) {
             return interaction.reply({ content: '❌ กรุณาแนบไฟล์รูปภาพสลิปเท่านั้น', ephemeral: true });
@@ -113,51 +114,32 @@ client.on('interactionCreate', async interaction => {
         await interaction.deferReply();
 
         try {
-            const response = await axios.post('https://api.easyslip.com/v1/verify', {
-                image: slipAttachment.url
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Content-Type': 'application/json'
-                }
-            });
+            // ส่งประวัติพร้อมสลิปไปที่ห้องประวัติการซื้อ
+            if (HISTORY_CHANNEL_ID && HISTORY_CHANNEL_ID !== '1510256256974196917') {
+                const historyChannel = await client.channels.fetch(HISTORY_CHANNEL_ID);
+                if (historyChannel) {
+                    const historyEmbed = new EmbedBuilder()
+                        .setTitle('📜 ประวัติการสั่งซื้อสินค้าสำเร็จ')
+                        .addFields(
+                            { name: '👤 ผู้ดูแลที่บันทึก', value: `${interaction.user} (${interaction.user.tag})`, inline: false },
+                            { name: '💰 ยอดชำระเงิน', value: `${amount.toLocaleString()} บาท`, inline: true },
+                            { name: '📝 รายละเอียด/หมายเหตุ', value: `${note}`, inline: true }
+                        )
+                        .setImage(slipAttachment.url)
+                        .setColor('Blue')
+                        .setTimestamp();
 
-            const data = response.data;
-
-            if (data.status === 200) {
-                const receiver = data.data.receiver;
-                const sender = data.data.sender;
-                const amount = data.data.amount.amount;
-                const transTime = data.data.transTimestamp;
-                const buyer = interaction.user;
-
-                await interaction.editReply(`✅ **ตรวจสอบสลิปสำเร็จ (ชำระเงินเรียบร้อย)**\n- **จำนวนเงิน:** \`${amount} บาท\`\n- **ผู้โอน:** \`${sender.name.th}\`\n- **เวลา:** \`${transTime}\``);
-
-                // ส่งข้อมูลพร้อมรูปสลิปไปบันทึกที่ห้องประวัติการซื้ออัตโนมัติ
-                if (HISTORY_CHANNEL_ID && HISTORY_CHANNEL_ID !== 'ใส่_ID_ห้องประวัติการซื้อตรงนี้') {
-                    const historyChannel = await client.channels.fetch(HISTORY_CHANNEL_ID);
-                    if (historyChannel) {
-                        const historyEmbed = new EmbedBuilder()
-                            .setTitle('📜 ประวัติการสั่งซื้อสินค้าสำเร็จ')
-                            .addFields(
-                                { name: '👤 ผู้ตรวจสอบ/ผู้ดูแล', value: `${buyer} (${buyer.tag})`, inline: false },
-                                { name: '💰 ยอดชำระเงิน', value: `${amount.toLocaleString()} บาท`, inline: true },
-                                { name: '🏦 ธนาคารผู้โอน', value: `${sender.bank.shortName}`, inline: true },
-                                { name: '🕒 เวลาทำรายการ', value: `${transTime}`, inline: false }
-                            )
-                            .setImage(slipAttachment.url)
-                            .setColor('Blue')
-                            .setTimestamp();
-
-                        await historyChannel.send({ embeds: [historyEmbed] });
-                    }
+                    await historyChannel.send({ embeds: [historyEmbed] });
+                    await interaction.editReply('✅ **บันทึกประวัติการสั่งซื้อและส่งรูปสลิปไปยังห้องประวัติเรียบร้อยแล้ว!**');
+                } else {
+                    await interaction.editReply('❌ ไม่พบช่องประวัติการสั่งซื้อ กรุณาเช็ค HISTORY_CHANNEL_ID');
                 }
             } else {
-                await interaction.editReply(`❌ **สลิปไม่ถูกต้องหรือไม่ผ่านการตรวจสอบ:** ${data.message || 'Error'}`);
+                await interaction.editReply('❌ ยังไม่ได้ตั้งค่า HISTORY_CHANNEL_ID ในไฟล์ index.js');
             }
         } catch (error) {
-            console.error(error?.response?.data || error.message);
-            await interaction.editReply('❌ เกิดข้อผิดพลาดในการเชื่อมต่อระบบตรวจสอบสลิป (EasySlip)');
+            console.error(error);
+            await interaction.editReply('❌ เกิดข้อผิดพลาดในการส่งประวัติการสั่งซื้อ');
         }
     }
 });
