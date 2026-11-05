@@ -1,6 +1,13 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
-const qrcode = require('qrcode');
-const generatePayload = require('promptpay-qr');
+const { 
+    Client, 
+    GatewayIntentBits, 
+    REST, 
+    Routes, 
+    SlashCommandBuilder, 
+    EmbedBuilder, 
+    PermissionFlagsBits 
+} = require('discord.js');
+const fs = require('fs');
 
 const client = new Client({
     intents: [
@@ -10,42 +17,90 @@ const client = new Client({
     ]
 });
 
-// 1. ใส่ ID ของห้อง Discord ที่ต้องการให้ประวัติการซื้อเด้งไปแสดง
-const HISTORY_CHANNEL_ID = 'ใส่_ID_ห้องประวัติการซื้อตรงนี้';
+// ไฟล์สำหรับบันทึกข้อมูลการตั้งค่า
+const DATA_FILE = './bot_data.json';
+let botData = {
+    rate: { text: 'ยังไม่ได้ตั้งค่าเรทราคา', image: null },
+    payment: { text: 'ยังไม่ได้ตั้งค่าช่องทางชำระเงิน', image: null },
+    historyChannelId: null
+};
 
-// 2. กำหนดชื่อยศผู้ดูแลที่สามารถใช้คำสั่งได้
-const ADMIN_ROLE_NAME = 'ผู้ดูแล';
+// โหลดข้อมูลเก่าถ้ามีไฟล์บันทึกอยู่
+if (fs.existsSync(DATA_FILE)) {
+    try {
+        botData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    } catch (err) {
+        console.error('Error loading data:', err);
+    }
+}
 
+// ฟังก์ชันบันทึกข้อมูล
+function saveData() {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(botData, null, 2));
+}
+
+// สร้าง Slash Commands
 const commands = [
+    // 1. ตั้งค่าเรทราคา
     new SlashCommandBuilder()
-        .setName('buy')
-        .setDescription('สั่งซื้อสินค้าและสร้าง QR Code พร้อมชำระเงิน (เฉพาะผู้ดูแล)')
+        .setName('set-rate')
+        .setDescription('เซ็ทข้อความและรูปภาพเรทราคา')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .addStringOption(option => 
-            option.setName('item').setDescription('ชื่อสินค้า').setRequired(true))
-        .addNumberOption(option => 
-            option.setName('price').setDescription('ราคาสินค้า (บาท)').setRequired(true))
+            option.setName('details').setDescription('ข้อความรายละเอียดเรทราคา').setRequired(true))
         .addAttachmentOption(option => 
-            option.setName('image').setDescription('แนบรูปภาพสินค้า (ถ้ามี)').setRequired(false)),
+            option.setName('image').setDescription('รูปภาพเรทราคา (แนบรูป)').setRequired(false)),
 
+    // 2. ส่งเรทราคา
     new SlashCommandBuilder()
-        .setName('verifyslip')
-        .setDescription('บันทึกประวัติการสั่งซื้อและแนบสลิป (เฉพาะผู้ดูแล)')
-        .addAttachmentOption(option => 
-            option.setName('slip').setDescription('แนบรูปภาพสลิปการโอนเงิน').setRequired(true))
-        .addNumberOption(option => 
-            option.setName('amount').setDescription('จำนวนเงินที่โอน (บาท)').setRequired(true))
+        .setName('rate')
+        .setDescription('ส่งข้อความเรทราคาที่เซ็ทไว้'),
+
+    // 3. ตั้งค่าระบบชำระเงิน
+    new SlashCommandBuilder()
+        .setName('set-payment')
+        .setDescription('เซ็ทข้อความและรูปภาพ QR Code ชำระเงิน')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .addStringOption(option => 
-            option.setName('note').setDescription('หมายเหตุ หรือชื่อสินค้า (ถ้ามี)').setRequired(false))
+            option.setName('details').setDescription('ข้อความเลขบัญชี / ชื่อบัญชี').setRequired(true))
+        .addAttachmentOption(option => 
+            option.setName('qrcode').setDescription('รูปภาพ QR Code พร้อมเพย์/ธนาคาร').setRequired(false)),
+
+    // 4. ส่งระบบชำระเงิน
+    new SlashCommandBuilder()
+        .setName('pay')
+        .setDescription('ส่งช่องทางชำระเงินที่เซ็ทไว้'),
+
+    // 5. ให้เครดิต / จบการขาย
+    new SlashCommandBuilder()
+        .setName('credit')
+        .setDescription('ส่งข้อความขอบคุณและบันทึกประวัติการสั่งซื้อ')
+        .addUserOption(option => 
+            option.setName('customer').setDescription('ลูกค้าที่ซื้อ').setRequired(true))
+        .addStringOption(option => 
+            option.setName('product').setDescription('สินค้า/บริการ').setRequired(true))
+        .addNumberOption(option => 
+            option.setName('amount').setDescription('ยอดเงิน (บาท)').setRequired(true)),
+
+    // 6. ตั้งค่าห้องประวัติการสั่งซื้อ
+    new SlashCommandBuilder()
+        .setName('set-history-channel')
+        .setDescription('เซ็ทห้องสำหรับส่งสรุปประวัติการสั่งซื้อ')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addChannelOption(option => 
+            option.setName('channel').setDescription('เลือกห้องที่ต้องการให้บันทึกประวัติ').setRequired(true))
 ].map(command => command.toJSON());
 
+// ลงทะเบียน Slash Commands เมื่อบอทออนไลน์
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
     
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     try {
+        console.log('Started refreshing application (/) commands.');
         await rest.put(
             Routes.applicationCommands(process.env.CLIENT_ID),
-            { body: commands },
+            { body: commands }
         );
         console.log('Successfully reloaded application (/) commands.');
     } catch (error) {
@@ -53,93 +108,111 @@ client.once('ready', async () => {
     }
 });
 
+// จัดการการสั่งงาน Slash Commands
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    // ตรวจสอบยศผู้ดูแล (Admin Role)
-    const member = interaction.member;
-    const hasAdminRole = member.roles.cache.some(role => role.name === ADMIN_ROLE_NAME);
-    
-    if (!hasAdminRole && !member.permissions.has(PermissionFlagsBits.Administrator)) {
-        return interaction.reply({ content: `❌ คำสั่งนี้สามารถใช้ได้เฉพาะผู้ที่มีตำแหน่ง **"${ADMIN_ROLE_NAME}"** เท่านั้นครับ`, ephemeral: true });
+    const { commandName, options } = interaction;
+
+    // --- 1. /set-rate ---
+    if (commandName === 'set-rate') {
+        const details = options.getString('details');
+        const image = options.getAttachment('image');
+
+        botData.rate.text = details;
+        botData.rate.image = image ? image.url : null;
+        saveData();
+
+        await interaction.reply({ content: '✅ บันทึกระบบเรทราคาเรียบร้อยแล้ว!', ephemeral: true });
     }
 
-    const { commandName } = interaction;
+    // --- 2. /rate ---
+    if (commandName === 'rate') {
+        const embed = new EmbedBuilder()
+            .setTitle('📊 รายละเอียดเรทราคา')
+            .setDescription(botData.rate.text)
+            .setColor(0x00FFAA)
+            .setTimestamp();
 
-    // 1. คำสั่งสั่งซื้อสินค้าและสร้าง QR Code (/buy)
-    if (commandName === 'buy') {
-        const itemName = interaction.options.getString('item');
-        const price = interaction.options.getNumber('price');
-        const itemImage = interaction.options.getAttachment('image');
-        const promptpayNumber = process.env.PROMPTPAY_NUMBER;
-
-        if (!promptpayNumber) {
-            return interaction.reply({ content: '❌ ยังไม่ได้ตั้งค่าเบอร์ PromptPay ใน Environment Variables', ephemeral: true });
+        if (botData.rate.image) {
+            embed.setImage(botData.rate.image);
         }
 
-        try {
-            const payload = generatePayload(promptpayNumber, { amount: price });
-            const buffer = await qrcode.toBuffer(payload);
-
-            const embed = new EmbedBuilder()
-                .setTitle('🛒 รายการสั่งซื้อสินค้า')
-                .setDescription(`**สินค้า:** ${itemName}\n**ยอดที่ต้องชำระ:** \`${price.toLocaleString()} บาท\``)
-                .setColor('Green')
-                .setFooter({ text: 'เมื่อโอนเงินเรียบร้อยแล้ว แจ้งผู้ดูแลเพื่อยืนยันรายการ' });
-
-            if (itemImage) {
-                embed.setImage(itemImage.url);
-            }
-
-            await interaction.reply({
-                embeds: [embed],
-                files: [{ attachment: buffer, name: 'qrcode.png' }]
-            });
-        } catch (error) {
-            console.error(error);
-            await interaction.reply({ content: '❌ เกิดข้อผิดพลาดในการสร้าง QR Code', ephemeral: true });
-        }
+        await interaction.reply({ embeds: [embed] });
     }
 
-    // 2. คำสั่งบันทึกสลิปและส่งไปยังห้องประวัติการซื้อ (/verifyslip)
-    else if (commandName === 'verifyslip') {
-        const slipAttachment = interaction.options.getAttachment('slip');
-        const amount = interaction.options.getNumber('amount');
-        const note = interaction.options.getString('note') || 'ไม่มี';
+    // --- 3. /set-payment ---
+    if (commandName === 'set-payment') {
+        const details = options.getString('details');
+        const qrcode = options.getAttachment('qrcode');
 
-        if (!slipAttachment.contentType || !slipAttachment.contentType.startsWith('image/')) {
-            return interaction.reply({ content: '❌ กรุณาแนบไฟล์รูปภาพสลิปเท่านั้น', ephemeral: true });
+        botData.payment.text = details;
+        botData.payment.image = qrcode ? qrcode.url : null;
+        saveData();
+
+        await interaction.reply({ content: '✅ บันทึกช่องทางชำระเงินเรียบร้อยแล้ว!', ephemeral: true });
+    }
+
+    // --- 4. /pay ---
+    if (commandName === 'pay') {
+        const embed = new EmbedBuilder()
+            .setTitle('💳 ช่องทางการชำระเงิน')
+            .setDescription(botData.payment.text)
+            .setColor(0xFFAA00)
+            .setTimestamp();
+
+        if (botData.payment.image) {
+            embed.setImage(botData.payment.image);
         }
 
-        await interaction.deferReply();
+        await interaction.reply({ embeds: [embed] });
+    }
 
-        try {
-            // ส่งประวัติพร้อมสลิปไปที่ห้องประวัติการซื้อ
-            if (HISTORY_CHANNEL_ID && HISTORY_CHANNEL_ID !== '1510256256974196917') {
-                const historyChannel = await client.channels.fetch(HISTORY_CHANNEL_ID);
-                if (historyChannel) {
-                    const historyEmbed = new EmbedBuilder()
-                        .setTitle('📜 ประวัติการสั่งซื้อสินค้าสำเร็จ')
-                        .addFields(
-                            { name: '👤 ผู้ดูแลที่บันทึก', value: `${interaction.user} (${interaction.user.tag})`, inline: false },
-                            { name: '💰 ยอดชำระเงิน', value: `${amount.toLocaleString()} บาท`, inline: true },
-                            { name: '📝 รายละเอียด/หมายเหตุ', value: `${note}`, inline: true }
-                        )
-                        .setImage(slipAttachment.url)
-                        .setColor('Blue')
-                        .setTimestamp();
+    // --- 5. /set-history-channel ---
+    if (commandName === 'set-history-channel') {
+        const channel = options.getChannel('channel');
+        botData.historyChannelId = channel.id;
+        saveData();
 
-                    await historyChannel.send({ embeds: [historyEmbed] });
-                    await interaction.editReply('✅ **บันทึกประวัติการสั่งซื้อและส่งรูปสลิปไปยังห้องประวัติเรียบร้อยแล้ว!**');
-                } else {
-                    await interaction.editReply('❌ ไม่พบช่องประวัติการสั่งซื้อ กรุณาเช็ค HISTORY_CHANNEL_ID');
-                }
-            } else {
-                await interaction.editReply('❌ ยังไม่ได้ตั้งค่า HISTORY_CHANNEL_ID ในไฟล์ index.js');
+        await interaction.reply({ content: `✅ ตั้งค่าห้องประวัติการสั่งซื้อเป็น ${channel} เรียบร้อย!`, ephemeral: true });
+    }
+
+    // --- 6. /credit ---
+    if (commandName === 'credit') {
+        const customer = options.getUser('customer');
+        const product = options.getString('product');
+        const amount = options.getNumber('amount');
+
+        // แสดงข้อความให้เครดิตในห้องปัจจุบัน
+        const creditEmbed = new EmbedBuilder()
+            .setTitle('🎉 ขอบคุณที่ใช้บริการครับ!')
+            .setDescription(`ขอบคุณคุณ ${customer} ที่อุดหนุนสินค้ากับทางร้านเราครับ ❤️`)
+            .addFields(
+                { name: '📦 รายการสินค้า', value: product, inline: true },
+                { name: '💵 ยอดชำระเงิน', value: `${amount.toLocaleString()} บาท`, inline: true }
+            )
+            .setColor(0x57F287)
+            .setTimestamp();
+
+        await interaction.reply({ embeds: [creditEmbed] });
+
+        // ส่งสรุปเข้าห้องประวัติการสั่งซื้อ (ถ้าเซ็ตห้องไว้แล้ว)
+        if (botData.historyChannelId) {
+            const historyChannel = interaction.guild.channels.cache.get(botData.historyChannelId);
+            if (historyChannel) {
+                const historyEmbed = new EmbedBuilder()
+                    .setTitle('📝 สรุปประวัติการสั่งซื้อ')
+                    .addFields(
+                        { name: '👤 ลูกค้า', value: `${customer} (${customer.tag})`, inline: false },
+                        { name: '📦 สินค้า', value: product, inline: true },
+                        { name: '💰 ยอดเงิน', value: `${amount.toLocaleString()} บาท`, inline: true },
+                        { name: '🏠 ห้องที่ทำรายการ', value: `${interaction.channel.name}`, inline: false }
+                    )
+                    .setColor(0x3498DB)
+                    .setTimestamp();
+
+                await historyChannel.send({ embeds: [historyEmbed] });
             }
-        } catch (error) {
-            console.error(error);
-            await interaction.editReply('❌ เกิดข้อผิดพลาดในการส่งประวัติการสั่งซื้อ');
         }
     }
 });
